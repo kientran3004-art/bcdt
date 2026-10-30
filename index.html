@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DataPro – Phân tích khách hàng vận đơn</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--tx:#1d2330;--mu:#667085;--bd:#d9dde5;--ac:#0b5fff;--wr:#b42318}
+@media(prefers-color-scheme:dark){:root{--bg:#12151b;--card:#1b1f27;--tx:#e8ebf1;--mu:#98a2b3;--bd:#2d333f;--ac:#6c9bff;--wr:#ff8a80}}
+*{box-sizing:border-box}body{margin:0;font:14px/1.5 system-ui,Segoe UI,sans-serif;background:var(--bg);color:var(--tx);padding:16px}
+h1{font-size:20px;margin:0 0 4px}.mu{color:var(--mu)}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px;margin:12px 0}
+.row{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+label{display:block;font-weight:600;margin-bottom:4px}
+input,select,textarea,button{font:inherit;color:inherit;background:var(--card);border:1px solid var(--bd);border-radius:6px;padding:7px 9px;width:100%}
+textarea{height:70px}button{width:auto;cursor:pointer;background:var(--ac);color:#fff;border:0;padding:8px 16px;margin-right:8px}
+button.s{background:transparent;color:var(--ac);border:1px solid var(--ac)}
+.tw{overflow-x:auto;max-height:65vh}table{border-collapse:collapse;font-size:12.5px;white-space:pre-line}
+th,td{border:1px solid var(--bd);padding:4px 8px;vertical-align:top;text-align:left}
+th{position:sticky;top:0;background:var(--card)}td.n{text-align:right}td.w{color:var(--wr)}
+</style>
+</head>
+<body>
+<h1>DataPro – Phân tích khách hàng theo SĐT</h1>
+<div class="mu">Dữ liệu được xử lý hoàn toàn trong trình duyệt của bạn, không tải lên máy chủ nào.</div>
+
+<div class="card">
+  <div class="row">
+    <div><label>1. File vận đơn (.xlsx / .csv, chọn nhiều file)</label><input id="files" type="file" multiple accept=".xlsx,.xlsm,.xls,.csv"></div>
+    <div><label>Văn phòng tạo (để trống = tất cả)</label><input id="vp" placeholder="VD: ĐẠI LÝ HƯNG NGUYÊN"></div>
+    <div><label>Phạm vi tính cước gửi/nhận</label><select id="scope"><option value="last">Chỉ tháng mới nhất</option><option value="all">Tất cả các tháng</option></select></div>
+  </div>
+  <div style="margin-top:12px"><label>2. Danh sách SĐT cần xét (tùy chọn, mỗi SĐT một dòng; để trống = tất cả SĐT gửi)</label><textarea id="list"></textarea></div>
+  <div style="margin-top:12px"><button id="run">Phân tích</button><button id="exp" class="s" disabled>Xuất Excel</button><span id="st" class="mu"></span></div>
+</div>
+<div class="card" id="res" hidden><div class="tw"><table id="tb"></table></div></div>
+
+<script>
+const $=id=>document.getElementById(id);
+let ROWS=[],OUT=null;
+const st=t=>$('st').textContent=t;
+const nk=s=>String(s).normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/đ/gi,'d').toLowerCase().replace(/[^a-z0-9]/g,'');
+const num=v=>{if(typeof v==='number')return v;const x=parseFloat(String(v??'').replace(/,/g,''));return isNaN(x)?0:x};
+const numKl=v=>{if(typeof v==='number')return v;const x=parseFloat(String(v??'').replace(',','.').replace(/\s/g,''));return isNaN(x)?0:x};
+const ph=v=>{let s=String(v??'').replace(/\D/g,'');if(s.length===9)s='0'+s;return s};
+function toDay(v){
+  if(typeof v==='number'&&v>20000)return Math.floor(v)-25569;
+  if(typeof v==='string'){const m=v.match(/(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+    if(m)return Date.UTC(+m[3],+m[2]-1,+m[1])/864e5;
+    const t=Date.parse(v);if(!isNaN(t))return Math.floor(t/864e5)}
+  return null}
+const ym=d=>{const x=new Date(d*864e5);return x.getUTCFullYear()+'-'+String(x.getUTCMonth()+1).padStart(2,'0')};
+const fd=d=>{const x=new Date(d*864e5);return String(x.getUTCDate()).padStart(2,'0')+'/'+String(x.getUTCMonth()+1).padStart(2,'0')+'/'+x.getUTCFullYear()};
+const lbl=m=>'T'+(+m.slice(5))+'/'+m.slice(0,4);
+const esc=s=>String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+const COLS={d:'ngaytaobill',bill:'mabill',g:'sdtgui',ten:'nguoigui',n:'sdtnguoinhan',kl:'khoiluong',c:'tongcuoc',tt:'benthanhtoan',bg:'kvgui',bn:'kvnhan',vp:'vanphongtao'};
+const REQ=['d','g','n','c'];
+
+$('files').onchange=async e=>{
+  ROWS=[];st('Đang đọc file...');
+  try{
+    for(const f of e.target.files){
+      const wb=XLSX.read(await f.arrayBuffer(),{type:'array'});
+      const ws=wb.Sheets['DULIEU2026']||wb.Sheets[wb.SheetNames[0]];
+      const js=XLSX.utils.sheet_to_json(ws,{raw:true,defval:''});
+      if(!js.length)continue;
+      const km={};Object.keys(js[0]).forEach(k=>km[nk(k)]=k);
+      const K={};for(const a in COLS)K[a]=km[COLS[a]];
+      const miss=REQ.filter(a=>!K[a]);
+      if(miss.length){st('File '+f.name+' thiếu cột: '+miss.map(a=>COLS[a]).join(', '));return}
+      for(const r of js){
+        const day=toDay(r[K.d]);if(day==null)continue;
+        ROWS.push({day,m:ym(day),bill:String(r[K.bill]??'').trim(),g:ph(r[K.g]),n:ph(r[K.n]),ten:String(r[K.ten]??'').trim(),
+          kl:numKl(r[K.kl]),c:num(r[K.c]),tt:String(r[K.tt]??'').toUpperCase(),bg:String(r[K.bg]??'').trim(),bn:String(r[K.bn]??'').trim(),vp:String(r[K.vp]??'').trim()});
+      }
+    }
+    st('Đã nạp '+ROWS.length.toLocaleString('vi-VN')+' dòng.');
+  }catch(err){st('Lỗi đọc file: '+err.message)}
+};
+
+const inc=(o,k,v)=>o[k]=(o[k]||0)+v;
+
+function run(){
+  if(!ROWS.length){st('Chưa có dữ liệu. Hãy chọn file trước.');return}
+  const vpT=$('vp').value.trim().toUpperCase(),scope=$('scope').value;
+  const list=new Set($('list').value.split(/[\s,;]+/).map(ph).filter(Boolean));
+  if(!list.size)ROWS.forEach(r=>{if(r.g&&(!vpT||r.vp.toUpperCase()===vpT))list.add(r.g)});
+  if(!list.size){st('Không tìm thấy SĐT nào.');return}
+  const months=[...new Set(ROWS.map(r=>r.m))].sort(),last=months[months.length-1];
+  const P={};
+  const get=p=>P[p]||(P[p]={ten:'',mo:{},days:new Set(),mm:{},kl:0,bills:new Set(),vpc:{},gui:{},nhan:{},note:[]});
+  const seen=new Set();
+  for(const r of ROWS){
+    // lịch sử ngày (cả bên gửi lẫn bên nhận)
+    for(const p of [r.g,r.n]){
+      if(!p||!list.has(p))continue;
+      const s=get(p);s.days.add(r.day);
+      const x=s.mm[r.m];if(!x)s.mm[r.m]=[r.day,r.day];else{if(r.day<x[0])x[0]=r.day;if(r.day>x[1])x[1]=r.day}
+    }
+    // thống kê theo SĐT gửi
+    if(r.g&&list.has(r.g)){
+      const s=get(r.g);if(!s.ten&&r.ten)s.ten=r.ten;
+      const mo=s.mo[r.m]||(s.mo[r.m]={c:0,b:new Set(),rows:0});
+      mo.c+=r.c;s.kl+=r.kl;
+      const kb=r.g+'|'+r.bill;
+      if(r.bill){mo.b.add(r.bill);if(!seen.has(kb)){seen.add(kb);s.bills.add(r.bill)}}else mo.rows++;
+      inc(s.vpc,r.bg||'Chưa xác định',1);
+    }
+    // cước gửi/nhận theo bưu cục, có luật loại trừ
+    if((scope==='all'||r.m===last)&&r.c>0&&r.g){
+      const both=list.has(r.g)&&list.has(r.n)&&r.g!==r.n;
+      const nn=/NN/.test(r.tt),ng=/NG/.test(r.tt)&&!nn;
+      let aG=true,aN=!!r.n&&r.n!==r.g;
+      if(both){
+        const f=r.c.toLocaleString('vi-VN');
+        if(ng){aN=false;get(r.n).note.push(`[LOẠI TRỪ] Bill ${r.bill} (${f}đ) gửi ${r.g} → nhận ${r.n}: người gửi trả (NG) → bên nhận không tính cước.`)}
+        else if(nn){aG=false;get(r.g).note.push(`[LOẠI TRỪ] Bill ${r.bill} (${f}đ) gửi ${r.g} → nhận ${r.n}: người nhận trả (NN) → bên gửi không tính cước.`)}
+      }
+      const suf=scope==='all'?' ('+r.m.slice(5)+'/'+r.m.slice(0,4)+')':'';
+      if(aG&&list.has(r.g))inc(get(r.g).gui,(r.bg||'Chưa xác định')+suf,r.c);
+      if(aN&&list.has(r.n))inc(get(r.n).nhan,(r.bn||'Chưa xác định')+suf,r.c);
+    }
+  }
+  // dựng bảng kết quả
+  const head=['SĐT','Tên người gửi'];
+  months.forEach(m=>head.push('Cước '+lbl(m),'Đơn '+lbl(m)));
+  head.push('Chênh lệch (tháng cuối − trước)','Tổng cước gửi','Tổng cước nhận','Bưu cục gửi','Cước gửi theo BC','Bưu cục nhận','Cước nhận theo BC',
+    'Tổng KL gửi (kg)','Tổng số đơn gửi','VP gửi chính','Ngày theo tháng','Cảnh báo >60 ngày','Phân loại KHM','Ghi chú loại trừ');
+  const out=[head];
+  const fmt=o=>Object.keys(o).map(k=>k);
+  for(const p of list){
+    const s=P[p];if(!s)continue;
+    const row=[p,s.ten];
+    months.forEach(m=>{const x=s.mo[m];row.push(x?x.c:0,x?x.b.size+x.rows:0)});
+    const cm=months.map(m=>s.mo[m]?s.mo[m].c:0);
+    row.push(cm.length>=2?cm[cm.length-1]-cm[cm.length-2]:(cm[0]||0));
+    const tg=Object.values(s.gui).reduce((a,b)=>a+b,0),tn=Object.values(s.nhan).reduce((a,b)=>a+b,0);
+    row.push(tg,tn,
+      fmt(s.gui).join('\n'),Object.values(s.gui).map(v=>v.toLocaleString('vi-VN')).join('\n'),
+      fmt(s.nhan).join('\n'),Object.values(s.nhan).map(v=>v.toLocaleString('vi-VN')).join('\n'),
+      Math.round(s.kl*100)/100,s.bills.size,
+      Object.entries(s.vpc).sort((a,b)=>b[1]-a[1])[0]?.[0]||'');
+    row.push(Object.keys(s.mm).sort().map(m=>{const [a,b]=s.mm[m];return 'Tháng '+(+m.slice(5))+': '+(a===b?fd(a):fd(a)+' ; '+fd(b))}).join('\n'));
+    const ds=[...s.days].sort((a,b)=>a-b);
+    row.push(ds.length&&ds[ds.length-1]-ds[0]>60?`Lịch sử cách nhau ${ds[ds.length-1]-ds[0]} ngày (${fd(ds[0])} → ${fd(ds[ds.length-1])})`:'');
+    let khm=ds.length?+ym(ds[0]).slice(5):0;
+    for(let i=0;i<ds.length-1;i++)if(ds[i+1]-ds[i]>60)khm=+ym(ds[i+1]).slice(5);
+    row.push(ds.length?'KHM tháng '+khm:'');
+    row.push(s.note.join('\n'));
+    out.push(row);
+  }
+  const ci=head.indexOf('Chênh lệch (tháng cuối − trước)');
+  out.slice(1).sort;
+  OUT=out;render();
+  st(`Xong: ${out.length-1} SĐT, ${months.length} tháng (${months.map(lbl).join(', ')}).`);
+  $('exp').disabled=false;
+}
+function render(){
+  const [h,...b]=OUT,shown=b.slice(0,500);
+  const wcol=h.indexOf('Ghi chú loại trừ'),cw=h.indexOf('Cảnh báo >60 ngày');
+  $('tb').innerHTML='<tr>'+h.map(x=>'<th>'+esc(x)+'</th>').join('')+'</tr>'+
+    shown.map(r=>'<tr>'+r.map((v,i)=>{
+      const isN=typeof v==='number';
+      return `<td class="${isN?'n':''} ${(i===wcol||i===cw)&&v?'w':''}">${esc(isN?v.toLocaleString('vi-VN'):v)}</td>`}).join('')+'</tr>').join('');
+  $('res').hidden=false;
+  if(b.length>500)st($('st').textContent+` (hiển thị 500 dòng đầu, file Excel xuất ra có đủ ${b.length}.)`);
+}
+$('run').onclick=()=>{st('Đang tính...');setTimeout(run,30)};
+$('exp').onclick=()=>{
+  const ws=XLSX.utils.aoa_to_sheet(OUT),wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,'KETQUA');XLSX.writeFile(wb,'DataPro_ketqua.xlsx');
+};
+</script>
+</body>
+</html>
